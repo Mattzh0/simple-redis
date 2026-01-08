@@ -17,6 +17,8 @@
 // C++
 #include <vector>
 
+const size_t k_max_msg = 32 << 20; // likely larger than the kernel buffer
+
 struct Conn {
 	int fd = -1;
 	// application's intention (for use in the event loop)
@@ -97,15 +99,71 @@ static Conn *handle_accept(int fd) {
 
 }
 
-// process one request if there is enoguh data
+// process one request if there is enough data
 static bool try_one_request(Conn *conn) {
-	;
+	// try to parse the message header (4 bytes, contains the size)
+	if (conn->incoming.size() < 4) {
+		return false; // not enough data
+	}
+
+	uint32_t len = 0;
+	memcpy(&len, conn->incoming.data(), 4);
+	if (len > k_max_msg) {
+		msg("too long");
+		conn->want_close = true;
+		return false;
+	}
+
+	// message body
+	if (len + 4 > conn->incoming.size()) {
+		return false; // not enough data
+	}
+
+	const uint8_t *request = &conn->incoming[4];
+
+	// got one request, do some application logic
+    printf("client says: len:%d data:%.*s\n", len, len < 100 ? len : 100, request);
+
+    // generate and echo the response
+    buf_append(conn->outgoing, (const uint8_t *)&len, 4);
+    buf_append(conn->outgoing, request, len);
+
+    // application logic done, remove the request message
+    buf_consume(conn->incoming, 4 + len);
+
+    return true; // success
+
 }
 
+// application callback whent he socket is writable
 static void handle_write(Conn *conn) {
- 	;
+ 	assert(conn->outgoing.size() > 0);
+
+ 	ssize_t res = write(conn->fd, &conn->outgoing[0], conn->outgoing.size());
+
+ 	// actually not ready
+ 	if (res < 0 && errno == EAGAIN) {
+ 		return;
+ 	}
+
+ 	if (res < 0) {
+ 		msg_errno("write() error");
+ 		conn->want_close = true;
+ 		return;
+ 	}
+
+ 	// remove the written data from the outgoing buffer
+ 	buf_consume(conn->outgoing, (size_t)res);
+
+ 	// update the readiness intention
+ 	if (conn->outgoing.size() == 0) { // all data has been written
+ 		conn->want_read = true;
+ 		conn->want_write = false;
+
+ 	}
 }
 
+// application callback when the socket is readable
 static void handle_read(Conn *conn) {
 	// read some data
 	uint8_t buf[64 * 1024];
@@ -113,6 +171,12 @@ static void handle_read(Conn *conn) {
 
 	// actually not ready
 	if (res < 0 && errno == EAGAIN) {
+		return;
+	}
+
+	if (res < 0) {
+		msg_errno("read() error");
+		conn->want_close = true;
 		return;
 	}
 
