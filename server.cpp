@@ -439,10 +439,8 @@ int main() {
 				delete conn;
 			}
 		}
-
-		return 0;
 	}
-
+	return 0;
 }
 
 /*
